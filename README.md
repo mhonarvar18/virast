@@ -19,8 +19,8 @@ The goal is to efficiently manage millions of users and posts using a **Fan-out 
 ## 🔹 Prerequisites
 
 - Go >= 1.21  
-- MySQL / MariaDB  
-- Redis  
+- MySQL / MariaDB (local instance recommended)  
+- Redis (local instance recommended)  
 - Git  
 
 ---
@@ -29,7 +29,7 @@ The goal is to efficiently manage millions of users and posts using a **Fan-out 
 
 ### 1. Clone the repository
 ```bash
-git clone https://github.com/yourusername/virast.git
+git clone https://github.com/mhonarvar18/virast.git
 cd virast
 ```
 
@@ -56,4 +56,14 @@ You can generate many fake users and posts for testing (just uncomment testStabi
 ```m
 testStability(ctx, userSvc, postSvc, followerScv)
 ```
+
+API Endpoints
+Include a small list of key API endpoints for reference:
+
+### API Endpoints
+
+- `POST /posts` – Create a new post.
+- `GET /timeline?start=0&limit=20` – Get paginated user timeline.
+- `POST /users/register` – Create a new user.
+- `POST /users/follow` – Follow another user.
 
