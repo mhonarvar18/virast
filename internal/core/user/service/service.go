@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"os"
 	"time"
 	userEntity "virast/internal/core/user"
 	userPort "virast/internal/ports/user"
@@ -27,7 +28,7 @@ func NewUserService(repo userPort.UserRepository, jwtKey []byte) *UserService {
 }
 
 // تعریف کلید JWT برای امضاء
-var jwtKey = []byte("secret_key")
+var jwtKey = []byte(os.Getenv("JWT_SECRET"))
 
 // LoginUser ورود کاربر و صدور توکن JWT
 func (s *UserService) LoginUser(ctx context.Context, username string, password string) (*userPort.LoginResponse, error) {
@@ -101,13 +102,13 @@ func (s *UserService) RegisterUser(ctx context.Context, name, family, username, 
 
 	// ذخیره کاربر در دیتابیس
 	u, err := s.UserRepository.Create(user)
-    if err != nil {
-        return nil, err
-    }
+	if err != nil {
+		return nil, err
+	}
 
-    return &userPort.UserDTO{
-        ID:       u.ID.String(),
-        Username: u.Username,
-        Mobile:   u.Mobile,
-    }, nil
+	return &userPort.UserDTO{
+		ID:       u.ID.String(),
+		Username: u.Username,
+		Mobile:   u.Mobile,
+	}, nil
 }
