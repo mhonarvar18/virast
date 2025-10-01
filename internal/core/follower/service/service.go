@@ -3,10 +3,12 @@ package followerapp
 import (
 	"context"
 	"errors"
+	"virast/internal/config"
 	followerEntity "virast/internal/core/follower"
 	followerPort "virast/internal/ports/follower"
 
 	"github.com/gofrs/uuid"
+	"go.uber.org/zap"
 )
 
 type FollowerService struct {
@@ -21,6 +23,7 @@ func NewFollowerService(repo followerPort.FollowerRepository) *FollowerService {
 
 func (s *FollowerService) FollowUser(ctx context.Context, followerID, followeeID string) error {
 	if followerID == followeeID {
+		config.Logger.Warn("⚠️ Cannot follow yourself", zap.String("userID", followerID))
 		return errors.New("cannot follow yourself")
 	}
 

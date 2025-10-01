@@ -2,10 +2,11 @@ package redis
 
 import (
 	"context"
-	"fmt"
 	"time"
+	"virast/internal/config"
 
 	"github.com/go-redis/redis/v8"
+	"go.uber.org/zap"
 )
 
 type FanoutRepositoryRedis struct {
@@ -20,9 +21,9 @@ func NewFanoutRepositoryRedis(client *redis.Client) *FanoutRepositoryRedis {
 
 // PushPostToFollowers: اضافه کردن postID به timeline ZSET تمام followers
 func (r *FanoutRepositoryRedis) PushPostToFollowers(ctx context.Context, postID string, followerIDs []string) error {
-	fmt.Println("!!!!!!!!!!!!!!!!!!!!!!!!!")
-	fmt.Println("Pushing post", postID, "to followers:", followerIDs)
-	fmt.Println("!!!!!!!!!!!!!!!!!!!!!!!!!")
+	config.Logger.Info("!!!!!!!!!!!!!!!!!!!!")
+	config.Logger.Info("Pushing post", zap.String("postID", postID), zap.Strings("followerIDs", followerIDs))
+	config.Logger.Info("!!!!!!!!!!!!!!!!!!!!!!!!!")
 	for _, followerID := range followerIDs {
 		key := "timeline:" + followerID
 
@@ -31,14 +32,14 @@ func (r *FanoutRepositoryRedis) PushPostToFollowers(ctx context.Context, postID 
 			Member: postID,
 		}
 
-		fmt.Println("Adding to ZSET", key, "postID:", postID)
+		config.Logger.Info("Adding to ZSET", zap.String("key", key), zap.String("postID", postID))
 
 		if err := r.Client.ZAdd(ctx, key, z).Err(); err != nil {
 			return err
 		}
 
 		// optional: چاپ برای debug
-		fmt.Println("Added post", postID, "to", key)
+		config.Logger.Info("Added post to timeline", zap.String("postID", postID), zap.String("timelineKey", key))
 	}
 
 	return nil
