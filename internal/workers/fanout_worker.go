@@ -2,6 +2,7 @@ package workers
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"virast/internal/core/fanoutqueue"
@@ -22,6 +23,7 @@ type FanoutWorker struct {
 	FollowerRepo followerPort.FollowerRepository
 	TimelineRepo timelinePort.TimelineRepository
 	BatchSize    int // تعداد رکوردهای batch برای Redis و timeline
+	Concurrency  int // تعداد goroutine های همزمان
 	Logger       *zap.Logger
 }
 
@@ -31,44 +33,88 @@ func NewFanoutWorker(
 	followerRepo followerPort.FollowerRepository,
 	timelineRepo timelinePort.TimelineRepository,
 	batchSize int,
+	concurrency int,
 	logger *zap.Logger,
 ) *FanoutWorker {
+	if batchSize <= 0 {
+		batchSize = 500
+	}
+	if concurrency <= 0 {
+		concurrency = 8
+	}
 	return &FanoutWorker{
 		FanoutRepo:   fanoutRepo,
 		FanoutRedis:  fanoutRedis,
 		FollowerRepo: followerRepo,
 		TimelineRepo: timelineRepo,
 		BatchSize:    batchSize,
+		Concurrency:  concurrency,
 		Logger:       logger,
 	}
 }
 
 // Run گوش دادن به صف و توزیع پست‌ها
 func (w *FanoutWorker) Run(ctx context.Context) {
-	w.Logger.Info("🚀 FanoutWorker started")
+	w.Logger.Info("🚀 FanoutWorker started", zap.Int("BatchSize", w.BatchSize), zap.Int("Concurrency", w.Concurrency))
+
+	if w.Concurrency <= 0 {
+		w.Concurrency = 8
+	}
+
+	jobs := make(chan *fanoutqueue.FanoutQueue, w.Concurrency*2)
+	var wg sync.WaitGroup
+
+	// راه‌اندازی ورکرها (ثابت)
+	for i := 0; i < w.Concurrency; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case fq, ok := <-jobs:
+					if !ok {
+						return // channel بسته شد → خروج تمیز
+					}
+					w.processFanout(ctx, fq)
+				}
+			}
+		}(i)
+	}
+
+	// حلقه‌ی Producer: هر N میلی‌ثانیه pendingها را می‌گیرد و به صف می‌فرستد
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+producer:
 	for {
 		select {
 		case <-ctx.Done():
-			w.Logger.Info("🛑 Fanout worker stopped")
-			return
-		default:
-			// گرفتن رکوردهای pending
+			break producer
+		case <-ticker.C:
 			pendingPosts, err := w.FanoutRepo.GetPendingPosts(ctx, int64(w.BatchSize))
 			if err != nil {
 				w.Logger.Error("❌ Error fetching pending posts:", zap.Error(err))
-				time.Sleep(time.Second)
 				continue
 			}
 
-			//w.Logger.Info("🔔 Found %d pending posts", len(pendingPosts))
-
+			// تزریق کارها به صف
 			for _, fq := range pendingPosts {
-				w.processFanout(ctx, fq)
+				select {
+				case <-ctx.Done():
+					break producer
+				case jobs <- fq:
+				}
 			}
-
-			time.Sleep(1000 * time.Millisecond)
 		}
 	}
+
+	// خاموشی تمیز
+	close(jobs) // به ورکرها بگو کار جدیدی نمیاد
+	wg.Wait()   // صبر کن همه ورکرها تموم کنند
+	w.Logger.Info("🛑 Fanout worker stopped")
+	w.Logger.Info("✅ All fanout jobs processed")
 }
 
 // پردازش یک رکورد FanoutQueue
