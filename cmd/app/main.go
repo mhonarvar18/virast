@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"fmt"
+	"golang.org/x/sync/errgroup"
 	"log"
 	"os"
 	"strconv"
+	"sync"
 	dbadapter "virast/internal/adapters/database"
 	"virast/internal/adapters/httpapi"
 	redisadapter "virast/internal/adapters/redis"
@@ -24,7 +26,7 @@ import (
 
 func main() {
 	config.Init() // بارگذاری تنظیمات از .env
-	
+
 	// اتصال به دیتابیس و اجرای مایگریشن‌ها
 	config.InitDB()
 
@@ -68,7 +70,8 @@ func main() {
 	if err != nil || batchSize <= 0 {
 		batchSize = 100 // مقدار پیش‌فرض
 	}
-	fanoutWorker := workers.NewFanoutWorker(fanoutRepo, fanoutRedis, followerRepo, timelineRepo, batchSize)
+	concurrency := 32 // تعداد goroutine های همزمان
+	fanoutWorker := workers.NewFanoutWorker(fanoutRepo, fanoutRedis, followerRepo, timelineRepo, batchSize, concurrency)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -106,68 +109,144 @@ func closeResources() {
 }
 
 func testStability(ctx context.Context, userSvc *userapp.UserService, postSvc *postapp.PostService, followerSvc *followerapp.FollowerService) {
-	const numUsers = 500
+	const numUsers = 1000
 	const postsPerUser = 10
 
-	fmt.Println("🚀 Starting testStability: creating users...")
+	const userConc = 16   // با pool DB هماهنگ کن
+	const followConc = 32 // سبک‌تر/نوشتنی‌تر؟ بالاتر هم می‌تونی ولی مراقب لاک‌های DB باش
+	const postConc = 32
 
-	// 1️⃣ ساخت کاربران
+	log.Println("🚀 creating users...")
+	userIDs, _ := createUsersConcurrent(ctx, userSvc, numUsers, userConc)
+	log.Printf("✅ created %d users", len(userIDs))
+
+	log.Println("🚀 creating follows (complete graph, no self)...")
+	createFollowsWithPool(ctx, followerSvc, userIDs, followConc)
+	log.Println("✅ follows done")
+
+	log.Println("🚀 creating posts...")
+	createPostsConcurrent(ctx, postSvc, userIDs, postsPerUser, postConc)
+	log.Println("✅ posts done")
+}
+
+func createUsersConcurrent(ctx context.Context, userSvc *userapp.UserService, numUsers, concurrency int) ([]string, error) {
 	userIDs := make([]string, 0, numUsers)
+
+	sem := make(chan struct{}, concurrency)
+	var mu sync.Mutex
+	eg, ctx := errgroup.WithContext(ctx)
+
 	for i := 0; i < numUsers; i++ {
-		username := fmt.Sprintf("testuser%d", i)
-		mobile := fmt.Sprintf("0912%07d", i)
-		u, err := userSvc.RegisterUser(ctx, "Test"+strconv.Itoa(i), "User", username, mobile, "password")
-		if err != nil {
-			log.Printf("❌ Error creating user %s: %v\n", username, err)
-			continue
-		}
-		userIDs = append(userIDs, u.ID)
-		if (i+1)%50 == 0 {
-			fmt.Printf("✅ Created %d users so far\n", i+1)
-		}
-	}
+		i := i
+		sem <- struct{}{}
+		eg.Go(func() error {
+			defer func() { <-sem }()
 
-	fmt.Printf("✅ Finished creating %d users\n", len(userIDs))
-
-	// 2️⃣ همه کاربرا همدیگه رو فالو کنن
-	fmt.Println("🚀 Starting follow setup...")
-	count := 0
-	for _, followerID := range userIDs {
-		for _, followeeID := range userIDs {
-			if followerID == followeeID {
-				continue // جلوگیری از self-follow
-			}
-			err := followerSvc.FollowUser(ctx, followerID, followeeID)
+			username := fmt.Sprintf("testuser%d", i)
+			mobile := fmt.Sprintf("0912%07d", i)
+			u, err := userSvc.RegisterUser(ctx, "Test"+strconv.Itoa(i), "User", username, mobile, "password")
 			if err != nil {
-				log.Printf("❌ Error: user %s could not follow %s: %v\n", followerID, followeeID, err)
-				continue
+				log.Printf("❌ create user %s: %v", username, err)
+				return nil // ادامه بده؛ شکست یک مورد، کل کار رو متوقف نکنه
 			}
-			count++
-			if count%1000 == 0 {
-				fmt.Printf("➡️ Processed %d follow relationships\n", count)
+			mu.Lock()
+			userIDs = append(userIDs, u.ID)
+			mu.Unlock()
+
+			if (i+1)%50 == 0 {
+				log.Printf("✅ Created %d users so far", i+1)
+			}
+			return nil
+		})
+	}
+
+	if err := eg.Wait(); err != nil {
+		return userIDs, err
+	}
+	return userIDs, nil
+}
+
+type followJob struct {
+	followerID string
+	followeeID string
+}
+
+func createFollowsWithPool(ctx context.Context, followerSvc *followerapp.FollowerService, userIDs []string, concurrency int) {
+	jobs := make(chan followJob, concurrency*2)
+	var wg sync.WaitGroup
+
+	// Workers
+	for w := 0; w < concurrency; w++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case job, ok := <-jobs:
+					if !ok {
+						return
+					}
+					if job.followerID == job.followeeID {
+						continue
+					}
+					if err := followerSvc.FollowUser(ctx, job.followerID, job.followeeID); err != nil {
+						// idempotent باش: اگر unique violation می‌ده، نادیده بگیر
+						log.Printf("⚠️ follow %s -> %s: %v", job.followerID, job.followeeID, err)
+					}
+					// در صورت نیاز لاگ سبک
+					log.Printf("✅ %s followed %s", job.followerID, job.followeeID)
+				}
+
+			}
+		}(w)
+
+	}
+
+	// Producer
+	go func() {
+		for _, followerID := range userIDs {
+			for _, followeeID := range userIDs {
+				if followerID == followeeID {
+					continue
+				}
+				select {
+				case <-ctx.Done():
+					close(jobs)
+					return
+				case jobs <- followJob{followerID, followeeID}:
+				}
 			}
 		}
-	}
-	fmt.Printf("✅ Follow setup completed: total %d follow relationships created\n", count)
+		close(jobs)
+	}()
 
-	// 3️⃣ هر کاربر ۱۰ پست ثبت کنه
-	fmt.Println("🚀 Starting post creation...")
-	postCount := 0
+	wg.Wait()
+}
+
+func createPostsConcurrent(ctx context.Context, postSvc *postapp.PostService, userIDs []string, postsPerUser, concurrency int) {
+	sem := make(chan struct{}, concurrency)
+	var eg errgroup.Group
+
 	for _, uid := range userIDs {
+		uid := uid
 		for p := 1; p <= postsPerUser; p++ {
-			content := fmt.Sprintf("Post %d by user %s", p, uid)
-			postDTO, err := postSvc.CreatePost(ctx, content, uid)
-			if err != nil {
-				log.Printf("❌ Error creating post for user %s: %v\n", uid, err)
-				continue
-			}
-			postCount++
-			if postCount%100 == 0 {
-				fmt.Printf("➡️ Created %d posts so far\n", postCount)
-			}
-			fmt.Printf("📝 Created post: ID=%s, Content='%s', UserID=%s\n", postDTO.ID, postDTO.Content, uid)
+			p := p
+			sem <- struct{}{}
+			eg.Go(func() error {
+				defer func() { <-sem }()
+				content := fmt.Sprintf("Post %d by user %s", p, uid)
+				postDTO, err := postSvc.CreatePost(ctx, content, uid)
+				if err != nil {
+					log.Printf("❌ create post for user %s: %v", uid, err)
+					return nil
+				}
+				// در صورت نیاز لاگ سبک
+				log.Printf("📝 post=%s user=%s", postDTO.ID, uid)
+				return nil
+			})
 		}
 	}
-
-	fmt.Printf("✅ Test data creation completed: total %d posts created\n", postCount)
+	_ = eg.Wait()
 }

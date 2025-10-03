@@ -3,6 +3,7 @@ package workers
 import (
 	"context"
 	"log"
+	"sync"
 	"time"
 
 	"virast/internal/core/fanoutqueue"
@@ -22,6 +23,7 @@ type FanoutWorker struct {
 	FollowerRepo followerPort.FollowerRepository
 	TimelineRepo timelinePort.TimelineRepository
 	BatchSize    int // تعداد رکوردهای batch برای Redis و timeline
+	Concurrency  int // تعداد goroutine های همزمان
 }
 
 func NewFanoutWorker(
@@ -30,42 +32,86 @@ func NewFanoutWorker(
 	followerRepo followerPort.FollowerRepository,
 	timelineRepo timelinePort.TimelineRepository,
 	batchSize int,
+	concurrency int,
 ) *FanoutWorker {
+	if batchSize <= 0 {
+		batchSize = 500
+	}
+	if concurrency <= 0 {
+		concurrency = 8
+	}
 	return &FanoutWorker{
 		FanoutRepo:   fanoutRepo,
 		FanoutRedis:  fanoutRedis,
 		FollowerRepo: followerRepo,
 		TimelineRepo: timelineRepo,
 		BatchSize:    batchSize,
+		Concurrency:  concurrency,
 	}
 }
 
 // Run گوش دادن به صف و توزیع پست‌ها
 func (w *FanoutWorker) Run(ctx context.Context) {
 	log.Println("🚀 FanoutWorker started")
+
+	if w.Concurrency <= 0 {
+		w.Concurrency = 8
+	}
+
+	jobs := make(chan *fanoutqueue.FanoutQueue, w.Concurrency*2)
+	var wg sync.WaitGroup
+
+	// راه‌اندازی ورکرها (ثابت)
+	for i := 0; i < w.Concurrency; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case fq, ok := <-jobs:
+					if !ok {
+						return // channel بسته شد → خروج تمیز
+					}
+					w.processFanout(ctx, fq)
+				}
+			}
+		}(i)
+	}
+
+	// حلقه‌ی Producer: هر N میلی‌ثانیه pendingها را می‌گیرد و به صف می‌فرستد
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+producer:
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("🛑 Fanout worker stopped")
-			return
-		default:
-			// گرفتن رکوردهای pending
+			break producer
+		case <-ticker.C:
 			pendingPosts, err := w.FanoutRepo.GetPendingPosts(ctx, int64(w.BatchSize))
 			if err != nil {
 				log.Println("❌ Error fetching pending posts:", err)
-				time.Sleep(time.Second)
 				continue
 			}
 
-			//log.Printf("🔔 Found %d pending posts\n", len(pendingPosts))
-
+			// تزریق کارها به صف
 			for _, fq := range pendingPosts {
-				w.processFanout(ctx, fq)
+				select {
+				case <-ctx.Done():
+					break producer
+				case jobs <- fq:
+				}
 			}
-
-			time.Sleep(1000 * time.Millisecond)
 		}
 	}
+
+	// خاموشی تمیز
+	close(jobs) // به ورکرها بگو کار جدیدی نمیاد
+	wg.Wait()   // صبر کن همه ورکرها تموم کنند
+	log.Println("🛑 Fanout worker stopped")
+	log.Println("✅ All fanout jobs processed")
 }
 
 // پردازش یک رکورد FanoutQueue
