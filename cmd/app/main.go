@@ -77,7 +77,7 @@ func main() {
 		config.Logger.Fatal("Failed to initialize logger:", zap.Error(err))
 	}
 
-	concurrency := 32 // تعداد goroutine های همزمان
+	concurrency := 8 // تعداد goroutine های همزمان
 	fanoutWorker := workers.NewFanoutWorker(fanoutRepo, fanoutRedis, followerRepo, timelineRepo, batchSize, concurrency, config.Logger)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -119,12 +119,12 @@ func testStability(ctx context.Context, logger *zap.Logger, userSvc *userapp.Use
 
 	logger.Info("🚀 Starting testStability: creating users...")
 
-	const numUsers = 1000
+	const numUsers = 500
 	const postsPerUser = 10
 
-	const userConc = 16   // با pool DB هماهنگ کن
-	const followConc = 32 // سبک‌تر/نوشتنی‌تر؟ بالاتر هم می‌تونی ولی مراقب لاک‌های DB باش
-	const postConc = 32
+	const userConc = 8   // با pool DB هماهنگ کن
+	const followConc = 4 // سبک‌تر/نوشتنی‌تر؟ بالاتر هم می‌تونی ولی مراقب لاک‌های DB باش
+	const postConc = 8
 
 	logger.Info("🚀 creating users...")
 
