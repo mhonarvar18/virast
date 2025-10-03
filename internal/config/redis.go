@@ -2,11 +2,11 @@ package config
 
 import (
 	"context"
-	"log"
 	"os"
 	"strconv"
 
 	"github.com/go-redis/redis/v8"
+	"go.uber.org/zap"
 )
 
 // RedisClient متغیر برای دسترسی به Redis
@@ -22,16 +22,16 @@ func InitRedis() {
 	}
 	// تنظیمات اتصال به Redis
 	RedisClient = redis.NewClient(&redis.Options{
-		Addr:     os.Getenv("REDIS_ADDR"), // آدرس Redis
-		Password: os.Getenv("REDIS_PASSWORD"),               // رمز عبور
-		DB:       redisDB,                // شماره دیتابیس
+		Addr:     os.Getenv("REDIS_ADDR"),     // آدرس Redis
+		Password: os.Getenv("REDIS_PASSWORD"), // رمز عبور
+		DB:       redisDB,                     // شماره دیتابیس
 	})
 
 	// بررسی اتصال به Redis
 	s, err := RedisClient.Ping(ctx).Result()
 	if err != nil {
-		log.Fatal("Error connecting to Redis:", err)
+		Logger.Fatal("Error connecting to Redis:", zap.Error(err))
 	}
-	log.Println("Redis ping response:", s)
-	log.Println("Connected to Redis")
+	Logger.Info("Redis ping response:", zap.String("response", s))
+	Logger.Info("Connected to Redis")
 }

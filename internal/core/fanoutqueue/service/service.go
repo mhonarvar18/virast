@@ -2,11 +2,11 @@ package fanoutqueueapp
 
 import (
 	"context"
-	"fmt"
 	"time"
 	"virast/internal/config"
 
 	"github.com/go-redis/redis/v8"
+	"go.uber.org/zap"
 )
 
 type FanoutService struct{}
@@ -17,12 +17,12 @@ func NewFanoutService() *FanoutService {
 
 // PushPostToFollowers تایم‌لاین تمام دنبال‌کننده‌ها را بروزرسانی می‌کند
 func (s *FanoutService) PushPostToFollowers(postID, userID string, followers []string) error {
-	fmt.Println("Pushing post", postID, "to followers:", followers)
+	config.Logger.Info("Pushing post", zap.String("postID", postID), zap.Strings("followerIDs", followers))
 	ctx := context.Background()
 	for _, followerID := range followers {
 		key := "timeline:" + followerID
 
-		fmt.Println("Adding post", postID, "to timeline key:", key)
+		config.Logger.Info("Adding post to timeline", zap.String("postID", postID), zap.String("timelineKey", key))
 
 		// member برای ZAdd
 		z := &redis.Z{
@@ -35,18 +35,18 @@ func (s *FanoutService) PushPostToFollowers(postID, userID string, followers []s
 			return err
 		}
 
-		fmt.Println("Added post", postID, "to timeline of follower", followerID)
+		config.Logger.Info("Added post to timeline", zap.String("postID", postID), zap.String("timelineKey", key))
 
 		// بررسی محتویات ZSET بعد از افزودن
-		fmt.Println("Redis address:", config.RedisClient.Options().Addr)
+		config.Logger.Info("Redis address:", zap.String("address", config.RedisClient.Options().Addr))
 		posts, err := config.RedisClient.ZRangeWithScores(ctx, key, 0, -1).Result()
 		if err != nil {
-			fmt.Println("Error reading ZSET:", err)
+			config.Logger.Error("Error reading ZSET:", zap.Error(err))
 			continue
 		}
-		fmt.Println("Timeline contents for", followerID, ":")
+		config.Logger.Info("Timeline contents for "+followerID, zap.Any("posts", posts))
 		for _, p := range posts {
-			fmt.Printf("  PostID: %v, Score: %v\n", p.Member, p.Score)
+			config.Logger.Info("Timeline post", zap.String("postID", p.Member.(string)), zap.Float64("score", p.Score))
 		}
 	}
 	return nil

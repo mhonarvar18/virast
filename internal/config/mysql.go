@@ -1,11 +1,12 @@
 package config
 
 import (
-	"log"
-	"os"
-
+	"go.uber.org/zap"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
+	"os"
+	"time"
 )
 
 // DB متغیر برای دسترسی به دیتابیس
@@ -16,10 +17,23 @@ var err error
 func InitDB() {
 	// تنظیمات اتصال به دیتابیس
 	dsn := os.Getenv("DB_DSN")
-	DB, err = gorm.Open(mysql.Open(dsn), &gorm.Config{})
+
+	newLogger := gormlogger.New(
+		zap.NewStdLog(Logger), // convert zap to stdlog
+		gormlogger.Config{
+			SlowThreshold: time.Second,
+			LogLevel:      gormlogger.Info,
+			Colorful:      true,
+		},
+	)
+
+	DB, err = gorm.Open(mysql.Open(dsn), &gorm.Config{
+		SkipDefaultTransaction: true,
+		Logger:                 newLogger,
+	})
 	if err != nil {
-		log.Fatal("Error connecting to the database:", err)
+		Logger.Fatal("failed to connect database", zap.Error(err))
 	}
-	log.Println("Database connected")
+	Logger.Info("Database connected")
 
 }

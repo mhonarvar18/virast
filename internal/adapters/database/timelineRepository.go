@@ -11,6 +11,7 @@ import (
 	userPort "virast/internal/ports/user"
 
 	"github.com/gofrs/uuid"
+	"go.uber.org/zap"
 )
 
 type TimelineRepositoryDatabase struct{}
@@ -29,42 +30,56 @@ func (repo *TimelineRepositoryDatabase) Add(ctx context.Context, tl *timelineEnt
 	}
 
 	if err := config.DB.Create(tl).Error; err != nil {
-		fmt.Println("Error adding to timeline:", err)
+		config.Logger.Error("Error adding to timeline:", zap.Error(err))
 		return err
 	}
+
+	config.Logger.Info("Added timeline record",
+		zap.String("timelineID", tl.ID.String()),
+		zap.String("userID", tl.UserID.String()),
+		zap.String("postID", tl.PostID.String()),
+	)
 	return nil
 }
 
 // AddBatch اضافه کردن چندین پست به جدول timeline به صورت دسته‌ای
 func (repo *TimelineRepositoryDatabase) AddBatch(ctx context.Context, timelines []*timelineEntity.Timeline) error {
 	if len(timelines) == 0 {
-		fmt.Println("⚠️ No timelines to add")
+		config.Logger.Warn("⚠️ No timelines to add")
 		return nil
 	}
 
 	// چک کنیم هیچ pointer nil نباشه
 	for i, tl := range timelines {
 		if tl == nil {
+			config.Logger.Error("Timeline is nil", zap.Int("index", i))
 			return fmt.Errorf("timeline[%d] is nil", i)
 		}
 		if tl.ID == uuid.Nil {
 			tl.ID = uuid.Must(uuid.NewV4())
 		}
 		if tl.UserID == uuid.Nil || tl.PostID == uuid.Nil {
+			config.Logger.Error("Timeline has nil UserID or PostID", zap.Int("index", i))
 			return fmt.Errorf("timeline[%d] has nil UserID or PostID", i)
 		}
 		if tl.CreatedAt.IsZero() {
 			tl.CreatedAt = time.Now()
 		}
-		fmt.Printf("Timeline[%d] ready: ID=%s UserID=%s PostID=%s\n", i, tl.ID, tl.UserID, tl.PostID)
+		config.Logger.Info("Timeline ready",
+			zap.Int("index", i),
+			zap.String("ID", tl.ID.String()),
+			zap.String("UserID", tl.UserID.String()),
+			zap.String("PostID", tl.PostID.String()),
+		)
 	}
 
 	// insert batch
 	if err := config.DB.CreateInBatches(&timelines, len(timelines)).Error; err != nil {
-		return fmt.Errorf("error adding batch to timeline: %w", err)
+		config.Logger.Error("error adding batch to timeline", zap.Error(err))
+		return err
 	}
 
-	fmt.Printf("✅ Added batch of %d timelines\n", len(timelines))
+	config.Logger.Info("✅ Added batch of timelines", zap.Int("count", len(timelines)))
 	return nil
 }
 
@@ -84,7 +99,7 @@ func (repo *TimelineRepositoryDatabase) GetTimelineByUserID(ctx context.Context,
 	for _, pid := range postIDs {
 		var postEntity postEntity.Post
 		if err := config.DB.Preload("User").First(&postEntity, "id = ?", pid).Error; err != nil {
-			fmt.Println("Warning: post not found:", pid)
+			config.Logger.Warn("Warning: post not found:", zap.String("postID", pid), zap.Error(err))
 			continue
 		}
 

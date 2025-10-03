@@ -3,14 +3,15 @@ package userapp
 import (
 	"context"
 	"errors"
-	"log"
 	"os"
 	"time"
+	"virast/internal/config"
 	userEntity "virast/internal/core/user"
 	userPort "virast/internal/ports/user"
 
 	"github.com/dgrijalva/jwt-go"
 	"github.com/gofrs/uuid"
+	"go.uber.org/zap"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -35,21 +36,21 @@ func (s *UserService) LoginUser(ctx context.Context, username string, password s
 	// پیدا کردن کاربر با یوزرنیم
 	user, err := s.UserRepository.FindByUsername(username)
 	if err != nil {
-		log.Println("Error finding user:", err)
+		config.Logger.Error("❌ Error finding user", zap.String("username", username), zap.Error(err))
 		return nil, errors.New("invalid credentials")
 	}
 
 	// مقایسه پسورد هش‌شده
 	err = bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(password))
 	if err != nil {
-		log.Println("invalid password")
+		config.Logger.Error("❌ Invalid password", zap.String("username", username), zap.Error(err))
 		return nil, errors.New("invalid credentials")
 	}
 
 	// ایجاد JWT Token
 	token, err := generateJWT(user)
 	if err != nil {
-		log.Println("Error generating JWT:", err)
+		config.Logger.Error("❌ Error generating JWT", zap.Error(err))
 		return nil, errors.New("could not generate token")
 	}
 

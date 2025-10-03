@@ -2,7 +2,6 @@ package workers
 
 import (
 	"context"
-	"log"
 	"sync"
 	"time"
 
@@ -15,6 +14,7 @@ import (
 	timelinePort "virast/internal/ports/timeline"
 
 	"github.com/gofrs/uuid"
+	"go.uber.org/zap"
 )
 
 type FanoutWorker struct {
@@ -24,6 +24,7 @@ type FanoutWorker struct {
 	TimelineRepo timelinePort.TimelineRepository
 	BatchSize    int // تعداد رکوردهای batch برای Redis و timeline
 	Concurrency  int // تعداد goroutine های همزمان
+	Logger       *zap.Logger
 }
 
 func NewFanoutWorker(
@@ -33,6 +34,7 @@ func NewFanoutWorker(
 	timelineRepo timelinePort.TimelineRepository,
 	batchSize int,
 	concurrency int,
+	logger *zap.Logger,
 ) *FanoutWorker {
 	if batchSize <= 0 {
 		batchSize = 500
@@ -47,12 +49,13 @@ func NewFanoutWorker(
 		TimelineRepo: timelineRepo,
 		BatchSize:    batchSize,
 		Concurrency:  concurrency,
+		Logger:       logger,
 	}
 }
 
 // Run گوش دادن به صف و توزیع پست‌ها
 func (w *FanoutWorker) Run(ctx context.Context) {
-	log.Println("🚀 FanoutWorker started")
+	w.Logger.Info("🚀 FanoutWorker started", zap.Int("BatchSize", w.BatchSize), zap.Int("Concurrency", w.Concurrency))
 
 	if w.Concurrency <= 0 {
 		w.Concurrency = 8
@@ -92,7 +95,7 @@ producer:
 		case <-ticker.C:
 			pendingPosts, err := w.FanoutRepo.GetPendingPosts(ctx, int64(w.BatchSize))
 			if err != nil {
-				log.Println("❌ Error fetching pending posts:", err)
+				w.Logger.Error("❌ Error fetching pending posts:", zap.Error(err))
 				continue
 			}
 
@@ -110,32 +113,32 @@ producer:
 	// خاموشی تمیز
 	close(jobs) // به ورکرها بگو کار جدیدی نمیاد
 	wg.Wait()   // صبر کن همه ورکرها تموم کنند
-	log.Println("🛑 Fanout worker stopped")
-	log.Println("✅ All fanout jobs processed")
+	w.Logger.Info("🛑 Fanout worker stopped")
+	w.Logger.Info("✅ All fanout jobs processed")
 }
 
 // پردازش یک رکورد FanoutQueue
 func (w *FanoutWorker) processFanout(ctx context.Context, fq *fanoutqueue.FanoutQueue) {
 	if fq == nil || fq.PostID == uuid.Nil || fq.UserID == uuid.Nil {
-		log.Println("❌ Invalid FanoutQueue record:", fq)
+		w.Logger.Error("❌ Invalid FanoutQueue record:", zap.Any("record", fq))
 		return
 	}
 
-	log.Printf("➡ Processing FanoutQueue: PostID=%s AuthorID=%s\n", fq.PostID, fq.UserID)
+	w.Logger.Info("➡ Processing FanoutQueue", zap.String("PostID", fq.PostID.String()), zap.String("AuthorID", fq.UserID.String()))
 
 	// گرفتن followers
 	followers, err := w.FollowerRepo.GetFollowersByUserID(ctx, fq.UserID.String())
 	if err != nil {
-		log.Println("❌ Error fetching followers:", err)
+		w.Logger.Error("❌ Error fetching followers:", zap.Error(err))
 		return
 	}
 
-	log.Printf("👥 Found %d followers for user %s\n", len(followers), fq.UserID)
+	w.Logger.Info("👥 Found followers for user", zap.String("UserID", fq.UserID.String()), zap.Int("Count", len(followers)))
 
 	if len(followers) == 0 {
-		log.Println("⚠️ No followers for user:", fq.UserID)
+		w.Logger.Warn("⚠️ No followers for user:", zap.String("UserID", fq.UserID.String()))
 		if err := w.FanoutRepo.MarkDone(ctx, fq.ID); err != nil {
-			log.Println("⚠️ Warning: could not mark fanout_queue done:", err)
+			w.Logger.Warn("⚠️ Warning: could not mark fanout_queue done:", zap.Error(err))
 		}
 		return
 	}
@@ -151,13 +154,13 @@ func (w *FanoutWorker) processFanout(ctx context.Context, fq *fanoutqueue.Fanout
 		end := min(i+w.BatchSize, len(followerIDs))
 		batch := followerIDs[i:end]
 
-		log.Printf("📦 Processing batch: %d followers (from %d to %d)\n", len(batch), i, end)
+		w.Logger.Info("📦 Processing batch", zap.Int("Count", len(batch)), zap.Int("From", i), zap.Int("To", end))
 
 		// ZADD
 		if err := w.FanoutRedis.PushPostToFollowers(ctx, fq.PostID.String(), batch); err != nil {
-			log.Println("❌ Error pushing batch to ZSET:", err)
+			w.Logger.Error("❌ Error pushing batch to ZSET:", zap.Error(err))
 		} else {
-			log.Printf("✅ Pushed post %s to ZSET for %d followers\n", fq.PostID, len(batch))
+			w.Logger.Info("✅ Pushed post to ZSET", zap.String("PostID", fq.PostID.String()), zap.Int("Count", len(batch)))
 		}
 
 		if len(batch) <= 0 {
@@ -170,9 +173,9 @@ func (w *FanoutWorker) processFanout(ctx context.Context, fq *fanoutqueue.Fanout
 
 	// بروزرسانی وضعیت رکورد fanout_queue به done
 	if err := w.FanoutRepo.MarkDone(ctx, fq.ID); err != nil {
-		log.Println("⚠️ Warning: could not mark fanout_queue done:", err)
+		w.Logger.Warn("⚠️ Warning: could not mark fanout_queue done:", zap.Error(err))
 	} else {
-		log.Printf("✅ FanoutQueue record marked as done: %s\n", fq.ID)
+		w.Logger.Info("✅ FanoutQueue record marked as done", zap.String("ID", fq.ID.String()))
 	}
 }
 
@@ -190,11 +193,11 @@ func addTimelines(ctx context.Context, w *FanoutWorker, fq *fanoutqueue.FanoutQu
 		})
 	}
 
-	log.Printf("📝 Adding batch to timeline: %d records\n", len(timelines))
+	w.Logger.Info("📝 Adding batch to timeline", zap.Int("Count", len(timelines)))
 	if err := w.TimelineRepo.AddBatch(ctx, timelines); err != nil {
-		log.Println("⚠️ Warning: could not add batch to timeline:", err)
+		w.Logger.Warn("⚠️ Warning: could not add batch to timeline", zap.Error(err))
 	} else {
-		log.Printf("✅ Added %d timeline records for post %s\n", len(timelines), fq.PostID)
+		w.Logger.Info("✅ Added timeline records for post", zap.String("PostID", fq.PostID.String()), zap.Int("Count", len(timelines)))
 	}
 }
 

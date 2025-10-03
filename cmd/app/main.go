@@ -3,8 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"golang.org/x/sync/errgroup"
-	"log"
 	"os"
 	"strconv"
 	"sync"
@@ -22,9 +20,13 @@ import (
 	"virast/internal/core/user"
 	userapp "virast/internal/core/user/service"
 	"virast/internal/workers"
+
+	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 )
 
 func main() {
+	config.InitLogger()
 	config.Init() // بارگذاری تنظیمات از .env
 
 	// اتصال به دیتابیس و اجرای مایگریشن‌ها
@@ -38,19 +40,19 @@ func main() {
 		&timeline.Timeline{},
 		&fanoutqueue.FanoutQueue{},
 	); err != nil {
-		log.Fatal("Error during migrations:", err)
+		config.Logger.Fatal("Error during migrations:", zap.Error(err))
 	}
 
-	log.Println("✅ Database migrations completed")
+	config.Logger.Info("✅ Database migrations completed")
 
 	// اتصال به Redis
 	config.InitRedis()
 
 	// بستن منابع بعد از اتمام کار سرور
-	defer closeResources()
+	defer closeResources(config.Logger)
 
 	// چاپ پیغام قبل از راه‌اندازی سرور
-	log.Println("App is running...")
+	config.Logger.Info("App is running...")
 
 	userRepo := dbadapter.NewUserRepositoryDatabase()                                                // آداپتر خروجی
 	postRepo := dbadapter.NewPostRepositoryDatabase()                                                // آداپتر خروجی
@@ -70,14 +72,19 @@ func main() {
 	if err != nil || batchSize <= 0 {
 		batchSize = 100 // مقدار پیش‌فرض
 	}
+
+	if err != nil {
+		config.Logger.Fatal("Failed to initialize logger:", zap.Error(err))
+	}
+
 	concurrency := 32 // تعداد goroutine های همزمان
-	fanoutWorker := workers.NewFanoutWorker(fanoutRepo, fanoutRedis, followerRepo, timelineRepo, batchSize, concurrency)
+	fanoutWorker := workers.NewFanoutWorker(fanoutRepo, fanoutRedis, followerRepo, timelineRepo, batchSize, concurrency, config.Logger)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	// TEST
-	testStability(ctx, userSvc, postSvc, followerScv)
+	testStability(ctx, config.Logger, userSvc, postSvc, followerScv)
 	// End TEST
 
 	// اجرای worker در پس‌زمینه
@@ -85,30 +92,33 @@ func main() {
 
 	// اجرای سرور Gin (در اینجا سرور به صورت بلوکینگ عمل می‌کند)
 	if err := r.Run(":" + os.Getenv("APP_PORT")); err != nil {
-		log.Fatal("Server failed to start: ", err)
+		config.Logger.Fatal("Server failed to start:", zap.Error(err))
 	}
 }
 
 // closeResources بستن اتصالات به Redis و دیتابیس
-func closeResources() {
+func closeResources(logger *zap.Logger) {
 	// بستن اتصال به Redis
 	if err := config.RedisClient.Close(); err != nil {
-		log.Println("Error closing Redis connection:", err)
+		logger.Error("Error closing Redis connection:", zap.Error(err))
 	}
 
 	// بستن اتصال دیتابیس
 	sqlDB, err := config.DB.DB() // گرفتن *sql.DB از *gorm.DB
 	if err != nil {
-		log.Println("Error getting raw DB:", err)
+		logger.Error("Error getting raw DB:", zap.Error(err))
 		return
 	}
 
 	if err := sqlDB.Close(); err != nil {
-		log.Println("Error closing database connection:", err)
+		logger.Error("Error closing database connection:", zap.Error(err))
 	}
 }
 
-func testStability(ctx context.Context, userSvc *userapp.UserService, postSvc *postapp.PostService, followerSvc *followerapp.FollowerService) {
+func testStability(ctx context.Context, logger *zap.Logger, userSvc *userapp.UserService, postSvc *postapp.PostService, followerSvc *followerapp.FollowerService) {
+
+	logger.Info("🚀 Starting testStability: creating users...")
+
 	const numUsers = 1000
 	const postsPerUser = 10
 
@@ -116,20 +126,22 @@ func testStability(ctx context.Context, userSvc *userapp.UserService, postSvc *p
 	const followConc = 32 // سبک‌تر/نوشتنی‌تر؟ بالاتر هم می‌تونی ولی مراقب لاک‌های DB باش
 	const postConc = 32
 
-	log.Println("🚀 creating users...")
-	userIDs, _ := createUsersConcurrent(ctx, userSvc, numUsers, userConc)
-	log.Printf("✅ created %d users", len(userIDs))
+	logger.Info("🚀 creating users...")
 
-	log.Println("🚀 creating follows (complete graph, no self)...")
-	createFollowsWithPool(ctx, followerSvc, userIDs, followConc)
-	log.Println("✅ follows done")
+	userIDs, _ := createUsersConcurrent(ctx, logger, userSvc, numUsers, userConc)
+	logger.Info("✅ created %d users", zap.Int("Count", len(userIDs)))
+	logger.Info("✅ created %d users")
 
-	log.Println("🚀 creating posts...")
-	createPostsConcurrent(ctx, postSvc, userIDs, postsPerUser, postConc)
-	log.Println("✅ posts done")
+	logger.Info("🚀 creating follows (complete graph, no self)...")
+	createFollowsWithPool(ctx, logger, followerSvc, userIDs, followConc)
+	logger.Info("✅ follows done")
+
+	logger.Info("🚀 creating posts...")
+	createPostsConcurrent(ctx, logger, postSvc, userIDs, postsPerUser, postConc)
+	logger.Info("✅ posts done")
 }
 
-func createUsersConcurrent(ctx context.Context, userSvc *userapp.UserService, numUsers, concurrency int) ([]string, error) {
+func createUsersConcurrent(ctx context.Context, logger *zap.Logger, userSvc *userapp.UserService, numUsers, concurrency int) ([]string, error) {
 	userIDs := make([]string, 0, numUsers)
 
 	sem := make(chan struct{}, concurrency)
@@ -146,7 +158,7 @@ func createUsersConcurrent(ctx context.Context, userSvc *userapp.UserService, nu
 			mobile := fmt.Sprintf("0912%07d", i)
 			u, err := userSvc.RegisterUser(ctx, "Test"+strconv.Itoa(i), "User", username, mobile, "password")
 			if err != nil {
-				log.Printf("❌ create user %s: %v", username, err)
+				logger.Error("❌ Error creating user", zap.String("username", username), zap.Error(err))
 				return nil // ادامه بده؛ شکست یک مورد، کل کار رو متوقف نکنه
 			}
 			mu.Lock()
@@ -154,7 +166,7 @@ func createUsersConcurrent(ctx context.Context, userSvc *userapp.UserService, nu
 			mu.Unlock()
 
 			if (i+1)%50 == 0 {
-				log.Printf("✅ Created %d users so far", i+1)
+				logger.Info("✅ Created users so far", zap.Int("count", i+1))
 			}
 			return nil
 		})
@@ -171,7 +183,7 @@ type followJob struct {
 	followeeID string
 }
 
-func createFollowsWithPool(ctx context.Context, followerSvc *followerapp.FollowerService, userIDs []string, concurrency int) {
+func createFollowsWithPool(ctx context.Context, logger *zap.Logger, followerSvc *followerapp.FollowerService, userIDs []string, concurrency int) {
 	jobs := make(chan followJob, concurrency*2)
 	var wg sync.WaitGroup
 
@@ -193,10 +205,10 @@ func createFollowsWithPool(ctx context.Context, followerSvc *followerapp.Followe
 					}
 					if err := followerSvc.FollowUser(ctx, job.followerID, job.followeeID); err != nil {
 						// idempotent باش: اگر unique violation می‌ده، نادیده بگیر
-						log.Printf("⚠️ follow %s -> %s: %v", job.followerID, job.followeeID, err)
+						logger.Error("❌ Error: user could not follow", zap.String("followerID", job.followerID), zap.String("followeeID", job.followeeID), zap.Error(err))
 					}
 					// در صورت نیاز لاگ سبک
-					log.Printf("✅ %s followed %s", job.followerID, job.followeeID)
+					logger.Info("➡️ Processed follow", zap.String("followerID", job.followerID), zap.String("followeeID", job.followeeID))
 				}
 
 			}
@@ -225,7 +237,7 @@ func createFollowsWithPool(ctx context.Context, followerSvc *followerapp.Followe
 	wg.Wait()
 }
 
-func createPostsConcurrent(ctx context.Context, postSvc *postapp.PostService, userIDs []string, postsPerUser, concurrency int) {
+func createPostsConcurrent(ctx context.Context, logger *zap.Logger, postSvc *postapp.PostService, userIDs []string, postsPerUser, concurrency int) {
 	sem := make(chan struct{}, concurrency)
 	var eg errgroup.Group
 
@@ -239,11 +251,11 @@ func createPostsConcurrent(ctx context.Context, postSvc *postapp.PostService, us
 				content := fmt.Sprintf("Post %d by user %s", p, uid)
 				postDTO, err := postSvc.CreatePost(ctx, content, uid)
 				if err != nil {
-					log.Printf("❌ create post for user %s: %v", uid, err)
+					logger.Error("❌ Error creating post", zap.String("userID", uid), zap.Error(err))
 					return nil
 				}
 				// در صورت نیاز لاگ سبک
-				log.Printf("📝 post=%s user=%s", postDTO.ID, uid)
+				logger.Info("📝 Created post", zap.String("ID", postDTO.ID), zap.String("Content", postDTO.Content), zap.String("UserID", uid))
 				return nil
 			})
 		}

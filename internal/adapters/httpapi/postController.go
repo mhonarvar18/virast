@@ -1,10 +1,11 @@
 package httpapi
 
 import (
-	"fmt"
 	"net/http"
+	"virast/internal/config"
 
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 )
 
 type PostController struct{ pc PostUseCase }
@@ -21,7 +22,7 @@ func (ctl *PostController) CreatePost(c *gin.Context) {
 	}
 	// گرفتن userID از context
 	userID, exists := c.Get("userID")
-	fmt.Println("UserID from context:", userID)
+	config.Logger.Info("UserID from context:", zap.String("userID", userID.(string)))
 	if !exists {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not found in context"})
 		return

@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	//fanoutQueueEntity "virast/internal/core/fanoutqueue"
+	"virast/internal/config"
 	"virast/internal/core/fanoutqueue"
 	postEntity "virast/internal/core/post"
 
@@ -15,6 +16,7 @@ import (
 	timelinePort "virast/internal/ports/timeline"
 
 	"github.com/gofrs/uuid"
+	"go.uber.org/zap"
 )
 
 type PostService struct {
@@ -43,12 +45,12 @@ func NewPostService(
 
 // CreatePost ایجاد یک پست جدید و اضافه کردن به FanoutQueue
 func (s *PostService) CreatePost(ctx context.Context, content, userID string) (*postPort.PostDTO, error) {
-	fmt.Println("🚀 CreatePost called with userID:", userID, "content:", content)
+	config.Logger.Info("🚀 CreatePost called", zap.String("userID", userID), zap.String("content", content))
 
 	// اعتبارسنجی UUID
 	uid, err := uuid.FromString(userID)
 	if err != nil {
-		fmt.Println("❌ Invalid userID:", userID, "error:", err)
+		config.Logger.Error("❌ Invalid userID", zap.String("userID", userID), zap.Error(err))
 		return nil, fmt.Errorf("invalid userID: %w", err)
 	}
 
@@ -61,10 +63,10 @@ func (s *PostService) CreatePost(ctx context.Context, content, userID string) (*
 
 	createdPost, err := s.PostRepository.Create(post)
 	if err != nil {
-		fmt.Println("❌ Failed to create post for userID:", userID, "error:", err)
+		config.Logger.Error("❌ Failed to create post", zap.String("userID", userID), zap.Error(err))
 		return nil, fmt.Errorf("failed to create post: %w", err)
 	}
-	fmt.Println("✅ Created post:", createdPost.ID, "for user:", createdPost.UserID)
+	config.Logger.Info("✅ Post created", zap.String("postID", createdPost.ID.String()), zap.String("userID", createdPost.UserID.String()))
 
 	// 2️⃣ ایجاد رکورد FanoutQueue (pending)
 	fq := &fanoutqueue.FanoutQueue{
@@ -76,19 +78,19 @@ func (s *PostService) CreatePost(ctx context.Context, content, userID string) (*
 
 	fanoutRecord, err := s.FanoutRepository.Create(ctx, fq)
 	if err != nil {
-		fmt.Println("⚠️ Warning: could not add to fanout_queue:", err)
+		config.Logger.Error("❌ Could not add to fanout_queue", zap.Error(err))
 	} else {
-		fmt.Println("✅ FanoutQueue record created:", fanoutRecord.ID)
+		config.Logger.Info("✅ Added to fanout_queue", zap.String("fanoutID", fanoutRecord.ID.String()), zap.String("postID", fanoutRecord.PostID.String()))
 	}
 
 	// 3️⃣ پیام برای FanoutWorker (برای ZSET)
 	if err := s.FanoutRedis.PushPostToFollowers(ctx, createdPost.ID.String(), []string{createdPost.UserID.String()}); err != nil {
-		fmt.Println("⚠️ Warning: could not push post to Redis ZSET:", err)
+		config.Logger.Error("❌ Could not push post to Redis ZSET", zap.Error(err))
 	} else {
-		fmt.Println("✅ Post pushed to Redis ZSET for user:", createdPost.UserID)
+		config.Logger.Info("✅ Post pushed to Redis ZSET for user", zap.String("userID", createdPost.UserID.String()))
 	}
 
-	fmt.Println("🚀 CreatePost completed for postID:", createdPost.ID)
+	config.Logger.Info("🚀 CreatePost completed", zap.String("postID", createdPost.ID.String()))
 	return &postPort.PostDTO{
 		ID:      createdPost.ID.String(),
 		Content: createdPost.Content,
